@@ -1,0 +1,39 @@
+@import "tailwindcss";
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: system-ui, -apple-system, sans-serif;
+  /* Warm linen tablecloth background */
+  background-color: #e8dcc8;
+  background-image:
+    repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 28px,
+      rgba(180, 160, 130, 0.15) 28px,
+      rgba(180, 160, 130, 0.15) 29px
+    ),
+    repeating-linear-gradient(
+      90deg,
+      transparent,
+      transparent 28px,
+      rgba(180, 160, 130, 0.15) 28px,
+      rgba(180, 160, 130, 0.15) 29px
+    );
+  color: #3b2f1e;
+  min-height: 100vh;
+  min-height: 100dvh;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+#root {
+  min-height: 100vh;
+  min-height: 100dvh;
+}
