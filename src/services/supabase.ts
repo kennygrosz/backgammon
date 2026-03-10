@@ -10,4 +10,9 @@ if (!supabaseUrl || !supabaseAnonKey) {
   );
 }
 
-export const supabase = createClient<Database>(supabaseUrl, supabaseAnonKey);
+export const supabase = createClient<Database>(supabaseUrl, supabaseAnonKey, {
+  auth: {
+    // Disable cross-tab lock to avoid "Lock broken by steal" errors
+    lock: async (_name, _timeout, fn) => await fn(),
+  },
+});

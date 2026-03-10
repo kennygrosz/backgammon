@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useAuthStore } from './stores/authStore';
 import Login from './pages/Login';
+import Lobby from './pages/Lobby';
 import Game from './pages/Game';
 
 function AuthGate({ children }: { children: React.ReactNode }) {
@@ -37,7 +38,7 @@ export default function App() {
           path="/"
           element={
             <AuthGate>
-              <Game />
+              <Lobby />
             </AuthGate>
           }
         />
