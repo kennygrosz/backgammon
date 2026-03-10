@@ -120,7 +120,7 @@ export async function updateGameState(
     win_type?: WinType | null;
   }
 ): Promise<boolean> {
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from('games')
     .update({
       ...updates,
@@ -129,10 +129,12 @@ export async function updateGameState(
       remaining_dice: updates.remaining_dice as unknown,
       last_move_at: new Date().toISOString(),
     })
-    .eq('id', gameId);
+    .eq('id', gameId)
+    .select('id')
+    .single();
 
-  if (error) {
-    console.error('updateGameState error:', error);
+  if (error || !data) {
+    console.error('updateGameState error:', error ?? 'no rows updated (RLS or missing row)');
     return false;
   }
   return true;

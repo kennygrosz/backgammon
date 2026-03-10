@@ -17,7 +17,7 @@ interface GameStore {
   myColor: Player | null;
   whiteUsername: string | null;
   blackUsername: string | null;
-  dbStatus: string | null; // 'waiting' | 'rolling' | 'moving' | 'finished'
+  dbStatus: string | null;
 
   // Local game state
   game: GameState;
@@ -27,6 +27,7 @@ interface GameStore {
   autoPassMessage: string | null;
   turnComplete: boolean;
   loading: boolean;
+  saving: boolean; // true while a DB write + read-back is in flight
 
   // Actions
   loadGame: (gameId: string, userId: string) => Promise<void>;
@@ -36,7 +37,7 @@ interface GameStore {
   clearSelection: () => void;
   makeMove: (move: Move) => void;
   undoLastMove: () => void;
-  submitTurn: () => void;
+  submitTurn: () => Promise<void>;
 }
 
 function dbToGameState(db: DbGame): GameState {
@@ -80,6 +81,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
   autoPassMessage: null,
   turnComplete: false,
   loading: true,
+  saving: false,
 
   loadGame: async (gameId: string, userId: string) => {
     set({ loading: true, gameId, autoPassMessage: null });
@@ -115,10 +117,26 @@ export const useGameStore = create<GameStore>((set, get) => ({
       movableSources: [],
       turnComplete: false,
     });
-
   },
 
   applyRemoteState: (db: DbGame) => {
+    const { saving, game } = get();
+
+    // Never apply while a DB write + read-back is in progress
+    if (saving) return;
+
+    // Ignore remote data that matches our current local state exactly
+    // (prevents no-op re-renders and guards against stale echoes)
+    const dbStatus = db.status === 'waiting' ? 'rolling' : db.status;
+    if (
+      db.current_player === game.currentPlayer &&
+      dbStatus === game.status &&
+      get().dbStatus !== 'waiting' // always apply waiting→rolling transitions
+    ) {
+      return;
+    }
+
+    console.log('[SYNC] applying remote state:', db.current_player, db.status);
     const updatedGame = dbToGameState(db);
     set({
       game: updatedGame,
@@ -136,7 +154,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
   roll: () => {
     const { game, myColor, gameId } = get();
     if (game.status !== 'rolling' || !myColor || !gameId) return;
-    if (game.currentPlayer !== myColor) return; // not your turn
+    if (game.currentPlayer !== myColor) return;
 
     const dice = rollDice();
     const remainingDice = diceToValues(dice);
@@ -154,7 +172,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
     // Auto-pass if no moves available
     if (movable.length === 0 || generateLegalTurns(newGame.board, newGame.currentPlayer, remainingDice)[0].length === 0) {
       const nextPlayer: Player = newGame.currentPlayer === 'white' ? 'black' : 'white';
-      const playerName = newGame.currentPlayer === 'white' ? 'White' : 'Blue';
+      const pName = newGame.currentPlayer === 'white' ? 'White' : 'Blue';
 
       const passedGame: GameState = {
         ...newGame,
@@ -164,34 +182,39 @@ export const useGameStore = create<GameStore>((set, get) => ({
         dice: null,
       };
 
+      // Set saving flag so poll doesn't interfere
       set({
         game: passedGame,
+        saving: true,
         selectedSource: null,
         legalDestinations: [],
         movableSources: [],
-        autoPassMessage: `${playerName} rolled ${dice[0]}-${dice[1]} but has no legal moves. Turn passed.`,
+        autoPassMessage: `${pName} rolled ${dice[0]}-${dice[1]} but has no legal moves. Turn passed.`,
         turnComplete: false,
       });
 
-      // Persist the pass
       updateGameState(gameId, {
         board_state: passedGame.board,
         current_player: nextPlayer,
         dice: null,
         remaining_dice: [],
         status: 'rolling',
-      });
+      }).then(async (ok) => {
+        if (ok) {
+          const verified = await fetchGame(gameId);
+          if (verified) {
+            set({ game: dbToGameState(verified), saving: false });
+            return;
+          }
+        }
+        set({ saving: false });
+      }).catch(() => set({ saving: false }));
       return;
     }
 
-    // Persist the roll so opponent sees the dice
-    updateGameState(gameId, {
-      board_state: newGame.board,
-      current_player: newGame.currentPlayer,
-      dice,
-      remaining_dice: remainingDice,
-      status: 'moving',
-    });
+    // Don't persist the roll to DB here — it will be saved when the turn
+    // is submitted. A fire-and-forget update here races with submitTurn()
+    // and can overwrite the final board state if it arrives at the server late.
 
     set({
       game: newGame,
@@ -261,9 +284,9 @@ export const useGameStore = create<GameStore>((set, get) => ({
         turnComplete: false,
       });
 
-      // Persist win
       const { gameId } = get();
       if (gameId) {
+        set({ saving: true });
         updateGameState(gameId, {
           board_state: newBoard,
           current_player: game.currentPlayer,
@@ -272,7 +295,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
           status: 'finished',
           winner,
           win_type: newGame.winType,
-        });
+        }).finally(() => set({ saving: false }));
       }
       return;
     }
@@ -344,7 +367,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
     });
   },
 
-  submitTurn: () => {
+  submitTurn: async () => {
     const { game, gameId } = get();
     if (game.turnMoves.length === 0 || !gameId) return;
 
@@ -360,21 +383,49 @@ export const useGameStore = create<GameStore>((set, get) => ({
       boardSnapshots: [],
     };
 
+    const payload = {
+      board_state: updatedGame.board,
+      current_player: nextPlayer,
+      dice: null as DiceRoll | null,
+      remaining_dice: [] as number[],
+      status: 'rolling',
+    };
+
+    // Set saving flag so poll/realtime don't interfere
     set({
       game: updatedGame,
+      saving: true,
       selectedSource: null,
       legalDestinations: [],
       movableSources: [],
       turnComplete: false,
     });
 
-    // Persist to DB
-    updateGameState(gameId, {
-      board_state: updatedGame.board,
-      current_player: nextPlayer,
-      dice: null,
-      remaining_dice: [],
-      status: 'rolling',
-    });
+    // Persist to DB — retry once on failure
+    let ok = await updateGameState(gameId, payload);
+    if (!ok) {
+      console.warn('[SUBMIT] first attempt failed, retrying…');
+      ok = await updateGameState(gameId, payload);
+    }
+    if (!ok) {
+      console.error('[SUBMIT] DB update failed after retry — reloading game state');
+      const fresh = await fetchGame(gameId);
+      if (fresh) {
+        set({ game: dbToGameState(fresh), saving: false });
+      } else {
+        set({ saving: false });
+      }
+      return;
+    }
+
+    // Read back from DB to confirm the write persisted.
+    // Keep saving=true the entire time so no poll/realtime can interfere.
+    const verified = await fetchGame(gameId);
+    if (verified) {
+      console.log('[SUBMIT] verified — DB has:', verified.current_player, verified.status);
+      set({ game: dbToGameState(verified), saving: false });
+    } else {
+      set({ saving: false });
+    }
   },
 }));

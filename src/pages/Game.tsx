@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useGameStore } from '../stores/gameStore';
 import { useAuthStore } from '../stores/authStore';
-import { fetchGame } from '../services/gameService';
+import { fetchGame, subscribeToGame, unsubscribeFromGame } from '../services/gameService';
 import type { DbGame } from '../services/gameService';
 import Board from '../components/Board';
 import Dice from '../components/Dice';
@@ -30,7 +30,6 @@ export default function Game() {
     turnComplete,
     loading,
     loadGame,
-    applyRemoteState,
     roll,
     selectSource,
     makeMove,
@@ -45,42 +44,46 @@ export default function Game() {
     }
   }, [id, user?.id]);
 
-  // Poll for opponent updates every 3s
+  // Realtime subscription for instant opponent updates
+  useEffect(() => {
+    if (!gameId) return;
+
+    const channel = subscribeToGame(gameId, (updatedGame) => {
+      const s = useGameStore.getState();
+      if (s.saving) return;
+      if (s.game.status === 'finished') return;
+      if (s.game.turnMoves.length > 0) return;
+      if (s.game.currentPlayer === s.myColor && s.game.status === 'moving') return;
+
+      useGameStore.getState().applyRemoteState(updatedGame);
+    });
+
+    return () => unsubscribeFromGame(channel);
+  }, [gameId]);
+
+  // Fallback poll every 10s in case realtime misses an update
   useEffect(() => {
     if (!gameId) return;
 
     const interval = setInterval(async () => {
-      const store = useGameStore.getState();
-      const { game: g, myColor: mc } = store;
-
-      // Don't poll if game is over
-      if (g.status === 'finished') {
-        console.log('[POLL] skipping — game finished');
-        return;
-      }
-
-      // Don't overwrite while we're actively moving
-      if (g.currentPlayer === mc && (g.status === 'moving' || g.turnMoves.length > 0)) {
-        console.log('[POLL] skipping — actively moving');
-        return;
-      }
+      const s = useGameStore.getState();
+      if (s.saving) return;
+      if (s.game.status === 'finished') return;
+      if (s.game.currentPlayer === s.myColor && s.game.status === 'moving') return;
 
       try {
         const fresh = await fetchGame(gameId);
-        if (!fresh) { console.log('[POLL] fetchGame returned null'); return; }
+        if (!fresh) return;
 
-        const freshPlayer = fresh.current_player;
-        console.log('[POLL] local:', g.currentPlayer, g.status, '| remote:', freshPlayer, fresh.status);
+        const current = useGameStore.getState();
+        if (current.saving) return;
+        if (current.game.turnMoves.length > 0) return;
 
-        // Apply if DB state differs from local
-        if (freshPlayer !== g.currentPlayer || fresh.status !== (g.status as string) || fresh.status === 'finished') {
-          console.log('[POLL] APPLYING remote state');
-          applyRemoteState(fresh as unknown as DbGame);
-        }
+        current.applyRemoteState(fresh as unknown as DbGame);
       } catch (err) {
         console.error('[POLL] error:', err);
       }
-    }, 3000);
+    }, 10000);
 
     return () => clearInterval(interval);
   }, [gameId]);
